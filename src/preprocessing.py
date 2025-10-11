@@ -3,7 +3,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler, PolynomialFeatures
-from imblearn.over_sampling import BorderlineSMOTE
+from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 import pandas as pd
 import numpy as np
@@ -42,12 +42,48 @@ def get_preproc():
             return X_binary
 
         def get_feature_names_out(self, input_features=None):
-            if self.feature_names_ is not None:
-                return np.array(self.feature_names_)
-            elif input_features is not None:
-                return np.array(input_features)
-            else:
-                return np.array([f"binary_{i}" for i in range(self.n_features_)])
+            return input_features
+
+    class FeaturesEngeneer(BaseEstimator, TransformerMixin):
+        def __init__(self, columns_to_drop=None, drop_patterns=None):
+            self.columns_to_drop = columns_to_drop or []
+            self.drop_patterns = drop_patterns or []
+            self.columns_to_drop_ = []
+
+        def fit(self, X, y=None, sample_weight=None):
+            self.columns_to_drop_ = []
+
+            # Добавляем явно указанные колонки
+            self.columns_to_drop_.extend(self.columns_to_drop)
+
+            # Добавляем колонки по паттернам
+            for pattern in self.drop_patterns:
+                matching_cols = [col for col in X.columns if pattern in col]
+                self.columns_to_drop_.extend(matching_cols)
+
+            # Убираем дубликаты
+            self.columns_to_drop_ = list(set(self.columns_to_drop_))
+
+            print(f"Columns to drop: {self.columns_to_drop_}")
+            return self
+
+        def transform(self, X: pd.DataFrame):
+            X = X.copy()
+
+            # Удаляем только существующие колонки
+            existing_cols_to_drop = [
+                col for col in self.columns_to_drop_ if col in X.columns]
+            X = X.drop(columns=existing_cols_to_drop)
+
+            return X
+
+        def get_feature_names_out(self, input_features=None):
+            if input_features is None:
+                return None
+
+            remaining_features = [feat for feat in input_features
+                                  if feat not in self.columns_to_drop_]
+            return np.array(remaining_features)
 
     def to_numeric_(X: pd.DataFrame):
         """Приводит все записи в табличке к числовым значениям"""
@@ -89,17 +125,19 @@ def get_preproc():
         ("sqrt", sqrt_num_pipeline, ["TotalCharges"]),
         ("yes_no", yes_no_pipeline, yes_no_cols),
         ("1hot", onehot_pipeline, cat_cols),
-    ], remainder='passthrough')
+    ], remainder='passthrough').set_output(transform='pandas')
 
     full_pipeline = ImbPipeline([
         ("preproc", preprocessing),
-        ("smote", BorderlineSMOTE(
+        ("debug", FeaturesEngeneer(columns_to_drop=["1hot__gender_Female", "1hot__gender_Male", "yes_no__StreamingMovies", "yes_no__MultipleLines",
+         "yes_no__PhoneService", "yes_no__DeviceProtection", "yes_no__OnlineBackup", "1hot__PaymentMethod_Mailed check"])),
+        ("smote", SMOTE(
             k_neighbors=5,
             random_state=42,
             sampling_strategy='auto',
-        ))
+        )),
     ])
-    
+
     return full_pipeline
 
 
@@ -107,10 +145,10 @@ if __name__ == "__main__":
     telco = pd.read_csv("../data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv")
     preprocessing = get_preproc()
     telco['Churn'] = telco['Churn'].map({'Yes': 1, 'No': 0})
-    
+
     y = telco["Churn"]
     X = telco.drop(columns="Churn")
-    
+
     X, y = preprocessing.fit_resample(X, y)
-    
-    print(y.value_counts())
+
+    print(len(preprocessing.get_feature_names_out()))
