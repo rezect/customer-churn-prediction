@@ -3,6 +3,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler, PolynomialFeatures
+from imblearn.over_sampling import BorderlineSMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
 import pandas as pd
 import numpy as np
 
@@ -81,7 +83,7 @@ def get_preproc():
         OneHotEncoder(handle_unknown="ignore", sparse_output=False),
     )
 
-    return ColumnTransformer([
+    preprocessing = ColumnTransformer([
         ("drop", "drop", ["customerID"]),
         ("num", default_num_pipeline, num_cols),
         ("sqrt", sqrt_num_pipeline, ["TotalCharges"]),
@@ -89,16 +91,26 @@ def get_preproc():
         ("1hot", onehot_pipeline, cat_cols),
     ], remainder='passthrough')
 
+    full_pipeline = ImbPipeline([
+        ("preproc", preprocessing),
+        ("smote", BorderlineSMOTE(
+            k_neighbors=5,
+            random_state=42,
+            sampling_strategy='auto',
+        ))
+    ])
+    
+    return full_pipeline
+
 
 if __name__ == "__main__":
     telco = pd.read_csv("../data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv")
     preprocessing = get_preproc()
     telco['Churn'] = telco['Churn'].map({'Yes': 1, 'No': 0})
-    preprocessing.fit(telco)
-
-    telco = pd.DataFrame(preprocessing.transform(
-        telco), columns=preprocessing.get_feature_names_out(), index=telco.index)
-    print(telco.columns)
-
-    telco_corr = telco.corr()
-    print(telco_corr["remainder__Churn"].sort_values(ascending=False))
+    
+    y = telco["Churn"]
+    X = telco.drop(columns="Churn")
+    
+    X, y = preprocessing.fit_resample(X, y)
+    
+    print(y.value_counts())
