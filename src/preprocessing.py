@@ -64,7 +64,6 @@ def get_preproc():
             # Убираем дубликаты
             self.columns_to_drop_ = list(set(self.columns_to_drop_))
 
-            print(f"Columns to drop: {self.columns_to_drop_}")
             return self
 
         def transform(self, X: pd.DataFrame):
@@ -136,7 +135,7 @@ def get_preproc():
             random_state=42,
             sampling_strategy='auto',
         )),
-    ])
+    ]).set_output(transform='pandas')
 
     return full_pipeline
 
@@ -152,3 +151,5 @@ if __name__ == "__main__":
     X, y = preprocessing.fit_resample(X, y)
 
     print(len(preprocessing.get_feature_names_out()))
+    print(preprocessing.get_feature_names_out())
+
