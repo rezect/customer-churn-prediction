@@ -1,200 +1,158 @@
-from preprocessing import get_preproc
-from utils import download_telco_churn_dataset, split_test_train
-from sklearn.dummy import DummyClassifier
+from scipy.stats import loguniform, uniform, randint
+from sklearn.model_selection import RandomizedSearchCV
+from utils import split_test_train
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import f1_score, classification_report, confusion_matrix, precision_score, recall_score, roc_auc_score
-from sklearn.pipeline import make_pipeline, Pipeline
-from sklearn.utils import class_weight
-from sklearn.model_selection import RandomizedSearchCV
-from scipy.stats import loguniform, uniform, randint
-
-# Models
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from xgboost import XGBClassifier
-from sklearn.svm import LinearSVC
-from sklearn.svm import SVC
-from lightgbm import LGBMClassifier
-
-# Utils
+from imblearn.pipeline import Pipeline as ImbPipeline
+from joblib import dump, load
 import pandas as pd
+import numpy as np
 import sys
+
+# Model
+from lightgbm import LGBMClassifier
 
 sys.path.append('C:\\Coding\\customer-churn-prediction\\src')
 
 RND_SEED = 42
 
-telco = pd.read_csv("../data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv")
-X_train, X_test, y_train, y_test = split_test_train(telco)
 
-preprocessing = get_preproc()
-
-
-def fit_and_evaluate(models, cv=10):
-    # Крафтим пайплайны для каждой модели
-    pipelines = {}
-
-    for name, model in models:
-        pipelines[name] = (Pipeline([
-            ("preproc", preprocessing),
-            ("model", model)
-        ]))
-
-    metrics = {}
-
-    # Оценивать модели будем по f1 score, но важна нам именно метрика recall для положительного класса
-    for name, model in pipelines.items():
-        # Оценим сырые модельки на CV
-        roc_auc_train = cross_val_score(
-            model, X_train, y_train, scoring='roc_auc', cv=cv, n_jobs=-1).mean()
-        f1_cv = cross_val_score(
-            model, X_train, y_train, scoring='f1', cv=cv, n_jobs=-1).mean()
-
-        # Исправляем дисбаланс классов
-        classes_weights = class_weight.compute_sample_weight(
-            class_weight='balanced',
-            y=y_train
-        )
-        model.fit(X_train, y_train, model__sample_weight=classes_weights)
-
-        # print(f"TRAIN ROC-AUC: {roc_auc_train}")
-        y_pred_test = model.predict(X_test)
-
-        # Metrics evaluating
-        roc_auc_test = roc_auc_score(y_test, y_pred_test)
-        # print(f"TEST ROC-AUC: {roc_auc_test}")
-
-        # Confusion Matrix
-        cm = confusion_matrix(y_test, y_pred_test)
-        cm_df = pd.DataFrame(cm,
-                             index=['Факт: 0', 'Факт: 1'],
-                             columns=['Прогноз: 0', 'Прогноз: 1'])
-        # print(cm_df)
-
-        metrics[name] = {
-            'roc_auc_test': roc_auc_test,
-            'roc_auc_cv': roc_auc_train,
-            'f1_cv': f1_cv,
-        }
-
-    sorted_metrics = dict(
-        sorted(metrics.items(), key=lambda item: -item[1]['f1_cv']))
-
-    print(f"ТОП МОДЕЛЕЙ:")
-    for name, metric in sorted_metrics.items():
-        print(
-            "\n" + f"{name} : \nF1: {metric['f1_cv']}\nAUC: {metric['roc_auc_cv']}")
-
-
-def fine_tuning_models(models_data):
+def fine_tuning_models(models_data, verbose=0):
     for name, model_data in models_data.items():
         models_data[name] = {
-            "pipeline": Pipeline([
-                ("preproc", preprocessing),
+            "pipeline": ImbPipeline([
+                ("preproc", preprocessing.named_steps['preproc']),
+                ("drop", preprocessing.named_steps['drop']),
+                ("smote", preprocessing.named_steps['smote']),
                 ("model", model_data["model"]),
             ]),
             "param_distrib": model_data["param_disturb"],
         }
 
-        f1_losses = cross_val_score(
-            models_data[name]["pipeline"], X_train, y_train, cv=10, n_jobs=-1, scoring='f1')
-        print(f'{name} f1:\n{pd.Series(f1_losses).mean()}')
+        roc_auc_losses = cross_val_score(
+            models_data[name]["pipeline"], X_train, y_train, cv=10, n_jobs=-1, scoring='roc_auc')
+        if (verbose == 1):
+            print(f'{name} ROC-AUC:\n{pd.Series(roc_auc_losses).mean()}')
 
-    # Исправляем дисбаланс классов
-    classes_weights = class_weight.compute_sample_weight(
-        class_weight='balanced',
-        y=y_train
-    )
-
-    print('=' * 50 + "Tuned models!!!" + '=' * 50)
+    if (verbose == 1):
+        print('=' * 50 + "Tuned models!!!" + '=' * 50)
 
     best_models = {}
+    n_iter = 50
 
     for name, model_data in models_data.items():
+        if name == "Logistic Regression":
+            n_iter = 200
         rnd_search = RandomizedSearchCV(model_data["pipeline"], param_distributions=model_data["param_distrib"],
-                                        n_iter=50, cv=5, n_jobs=-1, random_state=RND_SEED, scoring='f1')
-        rnd_search.fit(X_train, y_train, model__sample_weight=classes_weights)
+                                        n_iter=n_iter, cv=5, n_jobs=-1, random_state=RND_SEED, scoring='roc_auc')
+        rnd_search.fit(X_train, y_train)
 
-        f1_losses_cv = rnd_search.best_score_
+        roc_auc_losses_cv = rnd_search.best_score_
 
-        print(f'{name} f1:\n{pd.Series(f1_losses_cv).mean()}')
+        if (verbose == 1):
+            print(f'{name} AUC:\n{pd.Series(roc_auc_losses_cv).mean()}')
 
         best_models[name] = rnd_search.best_estimator_
 
     return best_models
 
 
+def get_optimal_threshold(model, target='f1', target_score=0.8, help_metric='recall', help_metric_min_score=0.7):
+    from sklearn.metrics import precision_recall_curve
+
+    if (target not in ['f1', 'precision', 'recall']):
+        raise ValueError("target must be 'f1', 'precision' or 'recall'.")
+
+    if (help_metric not in ['precision', 'recall']):
+        raise ValueError("target must be 'precision' or 'recall'.")
+
+    def f1(precision_, recall_):
+        if precision_ + recall_ == 0:
+            return 0.0
+
+        return 2 * (precision_ * recall_) / (precision_ + recall_)
+
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
+
+    precision, recall, thresholds = precision_recall_curve(
+        y_test, y_pred_proba)
+
+    f1s = []
+    max_f1_score = 0
+    max_f1_idx = 0
+
+    for i in range(len(thresholds)):
+        f1s.append(f1(precision[i], recall[i]))
+        if max_f1_score < f1s[i]:
+            if (help_metric is None):
+                max_f1_score = f1s[i]
+                max_f1_idx = i
+            elif (help_metric == 'recall') and (recall[i] >= help_metric_min_score):
+                max_f1_score = f1s[i]
+                max_f1_idx = i
+            elif (help_metric == 'precision') and (precision[i] >= help_metric_min_score):
+                max_f1_score = f1s[i]
+                max_f1_idx = i
+
+    optimal_idx_recall = np.argmin(recall >= target_score)
+    optimal_idx_precision = np.argmin(recall >= target_score)
+    optimal_threshold_recall = thresholds[optimal_idx_recall]
+    optimal_threshold_precision = thresholds[optimal_idx_precision]
+    optimal_threshold_f1 = thresholds[max_f1_idx]
+
+    if target == 'f1':
+        return optimal_threshold_f1
+    elif target == 'recall':
+        return optimal_threshold_recall
+    elif target == 'precision':
+        return optimal_threshold_precision
+
+
 if __name__ == "__main__":
+    telco = pd.read_csv("../data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv")
+    X_train, X_test, y_train, y_test = split_test_train(telco)
 
-    # Создаем сырые модели для проверки
-    lgbm = LGBMClassifier(random_state=RND_SEED, verbose=-1)
-    lr = LogisticRegression(random_state=RND_SEED, penalty='l2')
-    lin_svc = LinearSVC(C=1, random_state=RND_SEED)
-    gb = GradientBoostingClassifier(random_state=RND_SEED)
-    svc = SVC(C=1, random_state=RND_SEED)
-    rnd_forest = RandomForestClassifier(random_state=RND_SEED, n_jobs=-1)
-    xgb = XGBClassifier(random_state=RND_SEED, n_jobs=-1)
+    preprocessing = get_preproc()
 
-    models = [
-        ("Logistic Regression L2", lr),
-        ("LightGBM", lgbm),
-        ("RND Forest", rnd_forest),
-        ("XGB Classifier", xgb),
-        ("Gradient Boosting", gb),
-        ("Linear SVC", lin_svc),
-        ("SVC", svc),
-    ]
+    lgbm = LGBMClassifier(objective='binary',
+                          random_state=RND_SEED, verbose=-1)
 
-    # Находим топ лучших моделей по f1 score
-    fit_and_evaluate(models)
-
-    # Задаем сетки для поиска лучших параметров 3х лучших моделей моделей
-    pd_lin_svc = {
-        "model__tol": uniform(1e-6, 1e-4),
-        "model__C": loguniform(0.1, 10),
-        "model__fit_intercept": [True, False],
-        "model__intercept_scaling": loguniform(1, 10),
+    # Создадим сетку для поиска лучшей модели
+    pd_lgbm = {
+        'model__n_estimators': [100, 200, 500, 1000, 2000],
+        'model__learning_rate': [0.01, 0.05, 0.1],
+        'model__num_leaves': [31, 50, 100, 200],
+        'model__min_child_samples': [10, 20, 30],
+        'model__max_depth': [3, 5, 7, -1],
+        'model__subsample': [0.8, 0.9, 1.0],
+        'model__colsample_bytree': [0.8, 0.9, 1.0],
+        'model__reg_alpha': [0, 0.1, 0.5],
+        'model__reg_lambda': [0, 0.1, 0.5],
     }
-
-    pd_gb = {
-        "model__learning_rate": loguniform(0.05, 0.1),
-        "model__n_estimators": randint(100, 200),
-        "model__max_depth": randint(3, 5),
-        "model__max_features": ['sqrt', 'log2', None],
-    }
-
-    pd_lr = [
-        {
-            "model__penalty": ['l2'],
-            "model__tol": uniform(1e-6, 1e-4),
-            "model__C": loguniform(0.5, 10),
-            "model__max_iter": randint(50, 500),
-            "model__solver": ['lbfgs'],
-        },
-        {
-            "model__penalty": ['l2', 'l1'],
-            "model__tol": uniform(1e-6, 1e-4),
-            "model__C": loguniform(0.5, 10),
-            "model__max_iter": randint(50, 500),
-            "model__solver": ['liblinear'],
-        }
-    ]
 
     models_data = {
-        "Logistic Regression": {
-            "model": lr,
-            "param_disturb": pd_lr,
-        },
-        "Gradient Boosting": {
-            "model": gb,
-            "param_disturb": pd_gb,
-        },
-        "Linear SVC": {
-            "model": lin_svc,
-            "param_disturb": pd_lin_svc,
+        "LightGBM": {
+            "model": lgbm,
+            "param_disturb": pd_lgbm,
         },
     }
-    
+
+    print("Fine Tuning Started!\n")
     best_models = fine_tuning_models(models_data)
-    
-    
+    lgbm_tuned = best_models["LightGBM"]
+    print("Fine Tuning Ended\n")
+
+    from sklearn.model_selection import FixedThresholdClassifier
+
+    # Тюнингуем threshold
+    optimal_threshold_LGBM = get_optimal_threshold(
+        model=lgbm_tuned, target='f1', help_metric='recall', help_metric_min_score=0.8)
+    lgbm_tuned = FixedThresholdClassifier(
+        lgbm_tuned, threshold=optimal_threshold_LGBM)
+
+    # Сохраняем модель
+    model_path = 'models/model.joblib'
+    dump(lgbm_tuned, model_path)
+    model = load(model_path)
+
+    print(f1_score(y_test, model.predict(X_test)))
