@@ -1,28 +1,26 @@
-from scipy.stats import loguniform, uniform, randint
 from sklearn.model_selection import RandomizedSearchCV
 from utils import split_test_train
 from sklearn.model_selection import cross_val_score
-from sklearn.metrics import f1_score, classification_report, confusion_matrix, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import f1_score
 from imblearn.pipeline import Pipeline as ImbPipeline
 from joblib import dump, load
 import pandas as pd
 import numpy as np
-import sys
+from preprocessing import get_preproc
 
 # Model
-from lightgbm import LGBMClassifier
-
-sys.path.append('C:\\Coding\\customer-churn-prediction\\src')
+from catboost import CatBoostClassifier
 
 RND_SEED = 42
 
 
 def fine_tuning_models(models_data, verbose=0):
+    preprocessing = get_preproc()
+    
     for name, model_data in models_data.items():
         models_data[name] = {
             "pipeline": ImbPipeline([
                 ("preproc", preprocessing.named_steps['preproc']),
-                ("drop", preprocessing.named_steps['drop']),
                 ("smote", preprocessing.named_steps['smote']),
                 ("model", model_data["model"]),
             ]),
@@ -38,11 +36,9 @@ def fine_tuning_models(models_data, verbose=0):
         print('=' * 50 + "Tuned models!!!" + '=' * 50)
 
     best_models = {}
-    n_iter = 50
+    n_iter = 100
 
     for name, model_data in models_data.items():
-        if name == "Logistic Regression":
-            n_iter = 200
         rnd_search = RandomizedSearchCV(model_data["pipeline"], param_distributions=model_data["param_distrib"],
                                         n_iter=n_iter, cv=5, n_jobs=-1, random_state=RND_SEED, scoring='roc_auc')
         rnd_search.fit(X_train, y_train)
@@ -112,47 +108,43 @@ if __name__ == "__main__":
     telco = pd.read_csv("../data/raw/WA_Fn-UseC_-Telco-Customer-Churn.csv")
     X_train, X_test, y_train, y_test = split_test_train(telco)
 
-    preprocessing = get_preproc()
-
-    lgbm = LGBMClassifier(objective='binary',
-                          random_state=RND_SEED, verbose=-1)
+    catboost = CatBoostClassifier(verbose=0)
 
     # Создадим сетку для поиска лучшей модели
-    pd_lgbm = {
-        'model__n_estimators': [100, 200, 500, 1000, 2000],
-        'model__learning_rate': [0.01, 0.05, 0.1],
-        'model__num_leaves': [31, 50, 100, 200],
-        'model__min_child_samples': [10, 20, 30],
-        'model__max_depth': [3, 5, 7, -1],
-        'model__subsample': [0.8, 0.9, 1.0],
-        'model__colsample_bytree': [0.8, 0.9, 1.0],
-        'model__reg_alpha': [0, 0.1, 0.5],
-        'model__reg_lambda': [0, 0.1, 0.5],
+    pd_catboost = {
+        'model__iterations': [100, 200, 500, 1000],
+        'model__learning_rate': [0.01, 0.03, 0.05, 0.1, 0.15],
+        'model__depth': [4, 6, 8, 10],
+        'model__l2_leaf_reg': [1, 3, 5, 7, 9],
+        'model__random_strength': [0.5, 1, 2, 5],
+        'model__bagging_temperature': [0, 0.5, 1, 2],
+        'model__border_count': [32, 64, 128, 254],
+        'model__min_data_in_leaf': [1, 3, 5, 10, 20]
     }
 
     models_data = {
-        "LightGBM": {
-            "model": lgbm,
-            "param_disturb": pd_lgbm,
+        "CatBoost": {
+            "model": catboost,
+            "param_disturb": pd_catboost,
         },
     }
 
     print("Fine Tuning Started!\n")
     best_models = fine_tuning_models(models_data)
-    lgbm_tuned = best_models["LightGBM"]
+    catboost_tuned = best_models["CatBoost"]
     print("Fine Tuning Ended\n")
 
     from sklearn.model_selection import FixedThresholdClassifier
 
     # Тюнингуем threshold
     optimal_threshold_LGBM = get_optimal_threshold(
-        model=lgbm_tuned, target='f1', help_metric='recall', help_metric_min_score=0.8)
-    lgbm_tuned = FixedThresholdClassifier(
-        lgbm_tuned, threshold=optimal_threshold_LGBM)
+        model=catboost_tuned, target='f1', help_metric='recall', help_metric_min_score=0.8)
+    catboost_tuned = FixedThresholdClassifier(
+        catboost_tuned, threshold=optimal_threshold_LGBM)
 
     # Сохраняем модель
     model_path = 'models/model.joblib'
-    dump(lgbm_tuned, model_path)
+    dump(catboost_tuned, model_path)
     model = load(model_path)
 
     print(f1_score(y_test, model.predict(X_test)))

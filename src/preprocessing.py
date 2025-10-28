@@ -1,5 +1,5 @@
-from sklearn.pipeline import Pipeline, make_pipeline
-from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.pipeline import make_pipeline
+from sklearn.compose import ColumnTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler, PolynomialFeatures
@@ -107,12 +107,12 @@ def get_preproc():
                            interaction_only=True),
         StandardScaler(),
     )
-    sqrt_num_pipeline = make_pipeline(
+    log_num_pipeline = make_pipeline(
         FunctionTransformer(
             to_numeric_, feature_names_out="one-to-one", validate=False),
         SimpleImputer(strategy="mean"),
         FunctionTransformer(
-            np.sqrt, feature_names_out="one-to-one", validate=False),
+            np.log1p, feature_names_out="one-to-one", validate=False),
         StandardScaler()
     )
 
@@ -129,15 +129,15 @@ def get_preproc():
     preprocessing = ColumnTransformer([
         ("drop", "drop", ["customerID"]),
         ("num", default_num_pipeline, num_cols),
-        ("sqrt", sqrt_num_pipeline, ["TotalCharges"]),
+        ("log", log_num_pipeline, ["TotalCharges"]),
         ("yes_no", yes_no_pipeline, yes_no_cols),
         ("1hot", onehot_pipeline, cat_cols),
     ], remainder='passthrough').set_output(transform='pandas')
 
     full_pipeline = ImbPipeline([
         ("preproc", preprocessing),
-        ("drop", FeaturesEngineer(columns_to_drop=["1hot__gender_Female", "1hot__gender_Male", "yes_no__StreamingMovies", "yes_no__MultipleLines",
-         "yes_no__PhoneService", "yes_no__DeviceProtection", "yes_no__OnlineBackup", "1hot__PaymentMethod_Mailed check", "poly_features__1"])),
+        # ("drop", FeaturesEngineer(columns_to_drop=["1hot__gender_Female", "1hot__gender_Male", "yes_no__StreamingMovies", "yes_no__MultipleLines",
+        #  "yes_no__PhoneService", "yes_no__DeviceProtection", "yes_no__OnlineBackup", "1hot__PaymentMethod_Mailed check", "poly_features__1"])),
         ("smote", SMOTE(
             k_neighbors=5,
             random_state=42,
@@ -165,5 +165,5 @@ if __name__ == "__main__":
 
     X, y = preprocessing.fit_resample(X, y)
 
-    print(len(preprocessing.get_feature_names_out()))
+    print(preprocessing.get_feature_names_out())
 
